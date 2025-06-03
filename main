@@ -1,0 +1,144 @@
+/*************************************************
+ * TLD Exclusion list (Display) 
+ * Esclude tutti i domini elencati nella variabile 'stringsToExclude'
+ *************************************************/
+
+// Nome della lista di esclusione. Se la lista non esiste, verrà creata nell'account
+var EXCLUSION_LIST_NAME = 'esclusione placement';
+
+function main() {
+  var currentSetting = {
+    // Elenco di stringhe da controllare nei domini dei placement. Se un dominio contiene
+    // una di queste stringhe, verrà aggiunto alla lista di esclusione.
+    stringsToExclude: [
+      ".one", ".buzz", ".xyz", ".ee", ".cloud", ".ru",".ro",
+      ".space",".in",".news",".today",".fun",".mr",
+      ".me",".gratis",".link",".es",".al",".ua",".id",".app",
+      ".top",".group",".jp",".click",".shop",".pl",".su",
+      ".art",".gr",".am",".camera",".recipes"
+      
+    ],
+    dateRange: "LAST_30_DAYS",
+    reportType: "AUTOMATIC_PLACEMENTS_PERFORMANCE_REPORT",
+    metricsColumns: [
+      'DisplayName', 'Domain', 'CampaignName', 'CampaignId',
+      'AdGroupName', 'AdGroupId', 'Impressions', 'Clicks', 'Cost', 'CostPerConversion'
+    ],
+    whereConditions: ['WHERE', 'Clicks', '>=', '1'],
+    matchedCampaigns: {},
+    batchSize: 10000,  // Processa questa quantità di righe prima di attendere
+    yieldTime: 1000    // Attendi per questo numero di millisecondi
+  };
+
+  var DEBUG = 0;
+
+  try {
+    processReport(currentSetting);
+    excludePlacements(currentSetting);
+  } catch (e) {
+    Logger.log("Si è verificato un errore: " + e.message);
+    if (DEBUG) {
+      Logger.log("Traccia dello stack: " + e.stack);
+    }
+  }
+}
+
+function processReport(currentSetting) {
+  var columnsStr = currentSetting.metricsColumns.join(',');
+  var whereClause = currentSetting.whereConditions.join(" ");
+
+  var query = 'SELECT ' + columnsStr + ' ' +
+    'FROM ' + currentSetting.reportType + ' ' +
+    whereClause + ' ' +
+    'DURING ' + currentSetting.dateRange;
+
+  var report = AdsApp.report(query);
+  var reportIterator = report.rows();
+  var rowsProcessed = 0;
+
+  while (reportIterator.hasNext()) {
+    var row = reportIterator.next();
+    var displayName = row['DisplayName'];
+    var domain = row['Domain'];
+    var campaignId = row['CampaignId'];
+
+    // Escludi i risultati di youtube.com
+    if (domain.includes('youtube.com')) {
+      continue;
+    }
+
+    var result = containsAny(displayName, currentSetting.stringsToExclude);
+    if (result) {
+      if (!currentSetting.matchedCampaigns[campaignId]) {
+        currentSetting.matchedCampaigns[campaignId] = [];
+      }
+      currentSetting.matchedCampaigns[campaignId].push(domain);
+    }
+
+    rowsProcessed++;
+    if (rowsProcessed % currentSetting.batchSize === 0) {
+      Utilities.sleep(currentSetting.yieldTime);
+    }
+  }
+}
+
+function excludePlacements(currentSetting) {
+  // Creare o recuperare la lista di esclusioni condivisa
+  var listIter = AdsApp.excludedPlacementLists()
+    .withCondition("shared_set.name = '" + EXCLUSION_LIST_NAME + "'")
+    .get();
+
+  var exclusionList;
+  if (!listIter.hasNext()) {
+    exclusionList = AdsApp.newExcludedPlacementListBuilder()
+      .withName(EXCLUSION_LIST_NAME)
+      .build();
+    Logger.log("Creata una nuova lista di esclusione: " + EXCLUSION_LIST_NAME);
+  } else {
+    exclusionList = listIter.next();
+    Logger.log("Lista di esclusione trovata: " + exclusionList.getName());
+  }
+
+  var existingPlacements = {};
+  var placementsIter = exclusionList.excludedPlacements().get();
+  while (placementsIter.hasNext()) {
+    var placement = placementsIter.next();
+    existingPlacements[placement.getUrl()] = true;
+  }
+
+  for (var campaignId in currentSetting.matchedCampaigns) {
+    var matchedDomains = currentSetting.matchedCampaigns[campaignId];
+    for (var i = 0; i < matchedDomains.length; i++) {
+      var domain = matchedDomains[i];
+
+      // Escludi i risultati di youtube.com
+      if (domain.includes('youtube.com')) {
+        continue;
+      }
+
+      try {
+        if (!existingPlacements[domain]) {
+          exclusionList.addExcludedPlacement(domain);
+          Logger.log("Aggiunto alla lista di esclusione: " + domain);
+        } else {
+          Logger.log("Dominio già nella lista di esclusione: " + domain);
+        }
+      } catch (e) {
+        Logger.log("Errore nell'aggiungere il dominio " + domain + " alla lista: " + e.message);
+      }
+
+      if (i % 50 === 0) { // Attendi ogni 50 esclusioni
+        Utilities.sleep(1000);
+      }
+    }
+  }
+}
+
+function containsAny(str, substrings) {
+  for (var i = 0; i < substrings.length; i++) {
+    if (str.indexOf(substrings[i]) !== -1) {
+      return substrings[i];
+    }
+  }
+  return null;
+}
